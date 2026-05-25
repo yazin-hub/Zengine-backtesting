@@ -65,3 +65,11 @@ backtest_results/
 # into the project folder, add:
 #   .zengine/
 #   tokens/
+strategies/btc_eth_spread.py
+run_pairs_backtest.py
+BTCUSD_M15.csv
+ETHUSD_M15.csv
+strategies/btc_eth_spread.py
+run_pairs_backtest.py
+BTCUSD_M15.csv
+ETHUSD_M15.csv
