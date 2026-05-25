@@ -220,7 +220,8 @@ class PortfolioBroker(Broker):
         self._open = still_open
 
     def close_all_at(self, bar_idx: int, price: float,
-                     bar_time: "pd.Timestamp | None" = None) -> None:
+                     bar_time: "pd.Timestamp | None" = None,
+                     exit_reason: str = "end_of_data") -> None:
         for t in self._open:
             gross = ((price - t.fill_price) if t.side.value == "long"
                      else (t.fill_price - price)) * t.size
@@ -228,7 +229,7 @@ class PortfolioBroker(Broker):
             t.commission += comm
             t.exit_bar    = bar_idx
             t.exit_price  = price
-            t.exit_reason = "end_of_data"
+            t.exit_reason = exit_reason
             t.pnl_gross   = gross
             t.pnl_net     = gross - comm
             t.status      = OrderStatus.CLOSED
