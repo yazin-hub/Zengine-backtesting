@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "zengine"
+version         = "0.1.0"
+description     = "Look-ahead-free backtesting engine — structurally impossible to introduce look-ahead bias"
+readme          = "README.md"
+license         = { file = "LICENSE" }
+requires-python = ">=3.10"
+
+keywords = [
+    "backtesting", "trading", "algorithmic-trading",
+    "look-ahead-bias", "quantitative-finance", "strategy",
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "streamlit>=1.35",
+    "plotly>=5.18",
+]
+
+[project.optional-dependencies]
+# Core dev tooling
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "pandas-stubs>=2.0",
+]
+# Windows only — connects to a running MetaTrader 5 terminal
+mt5 = [
+    "MetaTrader5>=5.0.45",
+]
+# cTrader Open API — cross-platform, OAuth2, real bid/ask spread per bar
+ctrader = [
+    "ctrader-open-api>=1.0",
+    "requests>=2.28",
+]
+# Cross-platform free market data (daily bars unlimited; M1 last 7 days only)
+yahoo = [
+    "yfinance>=0.2.28",
+]
+# Install all optional data sources at once
+all-sources = [
+    "MetaTrader5>=5.0.45",
+    "ctrader-open-api>=1.0",
+    "requests>=2.28",
+    "yfinance>=0.2.28",
+]
+
+[project.scripts]
+zengine-ui = "engine._cli:launch_ui"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["engine*", "strategies*"]
+
+[tool.pytest.ini_options]
+testpaths    = ["tests"]
+addopts      = "-v --tb=short"
+
+[tool.ruff]
+line-length    = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version         = "3.10"
+strict                 = false
+ignore_missing_imports = true
+warn_return_any        = true
+warn_unused_ignores    = true
+# Engine core — type-check these; strategies can be looser
+files = ["engine"]

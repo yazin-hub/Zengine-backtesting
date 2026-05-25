@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Data files — do not commit large CSV data to the repo
+*.csv
+*.parquet
+*.feather
+*.h5
+*.hdf5
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.local
+*.env
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Streamlit
+.streamlit/
+
+# Logs
+*.log
+
+# Temporary outputs / results
+results/
+outputs/
+backtest_results/
+
+# cTrader OAuth2 tokens (stored outside repo in ~/.zengine/)
+# Listed here as a reminder — the actual files live in the user's home directory
+# and are never written inside the repo.  If you ever move token storage
+# into the project folder, add:
+#   .zengine/
+#   tokens/
