@@ -460,8 +460,15 @@ class Broker:
         self._open = still_open
 
     def close_all_at(self, bar_idx: int, price: float,
-                     bar_time: Optional["pd.Timestamp"] = None) -> None:
-        """Close all open positions at a given price (end-of-data MTM)."""
+                     bar_time: Optional["pd.Timestamp"] = None,
+                     exit_reason: str = "end_of_data") -> None:
+        """Close all open positions at a given price.
+
+        Args:
+            exit_reason: Label for the close — "end_of_data" (default, for
+                         final bar cleanup), "zscore_exit", "emergency_stop",
+                         or any custom string the caller supplies.
+        """
         eff_spread = self._get_effective_spread(bar_time)
         for t in self._open:
             exit_px = self._apply_spread_exit(price, t.side, eff_spread)
@@ -471,7 +478,7 @@ class Broker:
             t.commission += comm
             t.exit_bar    = bar_idx
             t.exit_price  = exit_px
-            t.exit_reason = "end_of_data"
+            t.exit_reason = exit_reason
             t.pnl_gross   = gross
             t.pnl_net     = gross - comm
             t.status      = OrderStatus.CLOSED
