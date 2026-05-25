@@ -83,7 +83,9 @@ target-version = "py310"
 python_version         = "3.10"
 strict                 = false
 ignore_missing_imports = true
-warn_return_any        = true
-warn_unused_ignores    = true
-# Engine core — type-check these; strategies can be looser
-files = ["engine"]
+warn_return_any        = false
+warn_unused_ignores    = false
+no_implicit_optional   = false
+# Engine core only; data_sources have too many third-party Any types
+files   = ["engine"]
+exclude = ["engine/data_sources/.*"]

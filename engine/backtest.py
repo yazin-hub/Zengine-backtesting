@@ -30,11 +30,14 @@ import logging
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from .data import DataFeed, CausalityError
 from .broker import Broker, BrokerConfig, OrderStatus
 from .strategy import BaseStrategy
+
+if TYPE_CHECKING:
+    from .mtf import MultiTimeframeFeed, MTFStrategy  # noqa: F401
 
 # Library-style logging: callers control visibility via
 #   logging.getLogger("engine.backtest").setLevel(logging.INFO)
@@ -337,7 +340,7 @@ def run_backtest(
         label=label,
         trades=all_trades,
         equity_curve=equity_curve,
-        timestamps=df.index,
+        timestamps=pd.DatetimeIndex(df.index),
         params=strategy.params,
         strategy_name=strategy.NAME,
     )
@@ -544,7 +547,7 @@ def run_backtest_mtf(
         label         = label,
         trades        = all_trades,
         equity_curve  = equity_curve,
-        timestamps    = primary.index,
+        timestamps    = pd.DatetimeIndex(primary.index),
         params        = strategy.params,
         strategy_name = strategy.NAME,
     )

@@ -178,7 +178,7 @@ def build_mtf_feeds(
         if key == primary_key:
             continue
         cursor_maps[key] = build_secondary_cursor_map(
-            primary_times, dfs[key].index
+            pd.DatetimeIndex(primary_times), pd.DatetimeIndex(dfs[key].index)
         )
 
     return MultiTimeframeFeed(primary_key, feeds, cursor_maps)

@@ -142,7 +142,9 @@ class PortfolioBroker(Broker):
         self._shared.deduct_commission(amount)
 
     def on_bar(self, bar_idx: int,
-               open_: float, high: float, low: float, close: float) -> None:
+               open_: float, high: float, low: float, close: float,
+               bar_time: "pd.Timestamp | None" = None,
+               atr: float | None = None) -> None:
         """
         Override on_bar to route P&L changes through SharedEquity.
         We capture equity before/after and apply the delta to the shared pool.
@@ -217,7 +219,8 @@ class PortfolioBroker(Broker):
                 still_open.append(t)
         self._open = still_open
 
-    def close_all_at(self, bar_idx: int, price: float) -> None:
+    def close_all_at(self, bar_idx: int, price: float,
+                     bar_time: "pd.Timestamp | None" = None) -> None:
         for t in self._open:
             gross = ((price - t.fill_price) if t.side.value == "long"
                      else (t.fill_price - price)) * t.size
@@ -467,7 +470,7 @@ def run_backtest_portfolio(
             label         = sym,
             trades        = broker._history,
             equity_curve  = eq_sym,
-            timestamps    = clean_dfs[sym].index,
+            timestamps    = pd.DatetimeIndex(clean_dfs[sym].index),
             params        = strategies[sym].params,
             strategy_name = strategies[sym].NAME,
         )

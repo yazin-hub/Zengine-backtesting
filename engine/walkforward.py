@@ -50,7 +50,7 @@ from typing import Callable, Union
 import numpy as np
 import pandas as pd
 
-from .backtest import run_backtest, audit_indicator_causality
+from .backtest import BacktestResult, run_backtest, audit_indicator_causality
 from .broker import BrokerConfig
 from .data import CausalityError
 from .metrics import compute_metrics
@@ -114,8 +114,8 @@ class WalkForwardWindow:
     best_params: dict
     is_score:    float
     oos_score:   float
-    is_result:   object   # BacktestResult
-    oos_result:  object   # BacktestResult
+    is_result:   "BacktestResult"
+    oos_result:  "BacktestResult"
 
     @property
     def score_ratio(self) -> float:
