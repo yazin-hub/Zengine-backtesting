@@ -12,13 +12,34 @@ Coverage target: connectors/base.py and connectors/ctrader.py to ≥95%.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+import sys
+from unittest.mock import MagicMock
 
-import pandas as pd
-import pytest
+# ── Stub optional heavy deps so CI runs without installing ctrader-open-api ───
+# ctrader-open-api and twisted are optional (pip install "zengine[ctrader]").
+# We inject MagicMock modules into sys.modules BEFORE any import that
+# references them — this makes `from ctrader_open_api.messages import ...`
+# and `patch("ctrader_open_api.messages...")` work in a package-free environment.
+# When the real package IS installed (e.g. on the VM), setdefault is a no-op.
+for _stub_mod in [
+    "ctrader_open_api",
+    "ctrader_open_api.messages",
+    "ctrader_open_api.messages.OpenApiMessages_pb2",
+    "ctrader_open_api.messages.OpenApiModelMessages_pb2",
+    "ctrader_open_api.messages.OpenApiCommonMessages_pb2",
+    "twisted",
+    "twisted.internet",
+    "twisted.internet.reactor",
+]:
+    sys.modules.setdefault(_stub_mod, MagicMock())
 
-from connectors.base import BaseConnector, OrderResult, Position
+from datetime import datetime, timezone  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
+
+from connectors.base import BaseConnector, OrderResult, Position  # noqa: E402
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
