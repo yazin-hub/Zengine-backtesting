@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from engine.broker import BrokerConfig, OrderStatus
-from engine.data import DataFeed, LookAheadError
+from engine.data import DataFeed
 from engine.pairs import PairsResult, PairsStrategy, run_backtest_pairs
 
 
@@ -22,7 +22,8 @@ def _make_ohlcv(n: int = 300, base: float = 100.0, seed: int = 42) -> pd.DataFra
     rng = np.random.default_rng(seed)
     closes = base + np.cumsum(rng.normal(0, 0.5, n))
     closes = np.maximum(closes, 1.0)
-    opens  = np.roll(closes, 1); opens[0] = closes[0]
+    opens    = np.roll(closes, 1)
+    opens[0] = closes[0]
     highs  = np.maximum(opens, closes) + rng.uniform(0, 0.3, n)
     lows   = np.minimum(opens, closes) - rng.uniform(0, 0.3, n)
     return pd.DataFrame(
@@ -307,7 +308,6 @@ class TestPairsFullCoverage:
 
     def test_verbose_true_hits_log_lines(self):
         """verbose=True covers the _log.info() lines (272, 289, 311, 374, 396)."""
-        import logging
         df = _make_ohlcv(300)
         # verbose=True is the default — just run without suppressing logs
         result = run_backtest_pairs(df, df.copy(), _NeverTradePairs(),
