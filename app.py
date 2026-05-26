@@ -2130,6 +2130,272 @@ Drawdown reference: *{dd_ref}*
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def tab_pairs():
+    """BTC/ETH Statistical Spread Pairs Trading — IS / OOS / FWD results."""
+    import sys, warnings, logging
+    warnings.filterwarnings("ignore")
+    logging.disable(logging.CRITICAL)
+
+    st.header("🔗 BTC/ETH Statistical Spread — Pairs Trading")
+    st.caption(
+        "Mean-reversion pairs strategy on the BTC/ETH spread. "
+        "Params locked from In-Sample optimisation only. "
+        "OOS and FWD are blind tests — zero re-fitting."
+    )
+
+    # ── Locked params display ────────────────────────────────────────────────
+    with st.expander("📌 Locked Strategy Parameters", expanded=False):
+        params_display = {
+            "hedge_ratio": 18,   "lookback": 100,
+            "entry_z": 2.0,      "exit_z": 0.3,      "sl_z": 2.3,
+            "volume_btc": 0.192, "corr_min": 0.7,
+            "max_hold_bars": 10, "adx_period": 14,   "adx_max": 30,
+        }
+        col1, col2, col3 = st.columns(3)
+        items = list(params_display.items())
+        for i, (k, v) in enumerate(items):
+            col = [col1, col2, col3][i % 3]
+            col.metric(k, v)
+
+    # ── Data file pickers ────────────────────────────────────────────────────
+    st.subheader("📂 Data Files")
+    here = Path(__file__).parent
+
+    c1, c2 = st.columns(2)
+    with c1:
+        btc_is_path  = st.text_input("BTC M15 (IS + OOS)",
+                                     value=str(here / "BTCUSD_M15.csv"),
+                                     key="pairs_btc_main")
+        btc_fwd_path = st.text_input("BTC M15 FWD (2026)",
+                                     value=str(here.parent / "BTCUSD_M15_FWD.csv"),
+                                     key="pairs_btc_fwd")
+    with c2:
+        eth_is_path  = st.text_input("ETH M15 (IS + OOS)",
+                                     value=str(here / "ETHUSD_M15.csv"),
+                                     key="pairs_eth_main")
+        eth_fwd_path = st.text_input("ETH M15 FWD (2026)",
+                                     value=str(here.parent / "ETHUSD_M15_FWD.csv"),
+                                     key="pairs_eth_fwd")
+
+    run_btn = st.button("▶ Run Pairs Backtest", type="primary",
+                        use_container_width=True, key="pairs_run")
+
+    if not run_btn and "pairs_results" not in st.session_state:
+        st.info("Configure data paths above and click **▶ Run Pairs Backtest**.")
+        return
+
+    if run_btn:
+        # ── Load helper ──────────────────────────────────────────────────────
+        def _load(path: str) -> pd.DataFrame | None:
+            p = Path(path)
+            if not p.exists():
+                return None
+            df = pd.read_csv(p)
+            df = df.rename(columns={
+                "DateTime": "time", "Open": "open", "High": "high",
+                "Low": "low", "Close": "close", "Volume": "volume",
+            })
+            df["time"] = df["time"].str.replace(
+                r"[+-]\d{2}:\d{2}$|Z$", "", regex=True
+            )
+            df["time"] = pd.to_datetime(df["time"])
+            return df.set_index("time").sort_index()
+
+        with st.spinner("Running IS / OOS / FWD backtests …"):
+            try:
+                sys.path.insert(0, str(here))
+                from engine.pairs import run_backtest_pairs
+                from engine.broker import BrokerConfig
+                try:
+                    from strategies.btc_eth_spread import BTCETHSpreadStrategy
+                except ImportError:
+                    st.error(
+                        "**Strategy file not found.**  \n"
+                        "`strategies/btc_eth_spread.py` is not included in the public repo — "
+                        "it contains research-optimised parameters kept private.  \n"
+                        "See `ZENGINE_BACKLOG.md` for the outline and implement your own "
+                        "version using the `PairsStrategy` base class."
+                    )
+                    return
+
+                btc_main = _load(btc_is_path)
+                eth_main = _load(eth_is_path)
+                btc_fwd  = _load(btc_fwd_path)
+                eth_fwd  = _load(eth_fwd_path)
+
+                if btc_main is None or eth_main is None:
+                    st.error("Main BTC/ETH CSV files not found — check paths above.")
+                    return
+
+                cfg_broker = BrokerConfig(commission_pct=0.0005)
+                PARAMS = {
+                    "hedge_ratio":18, "lookback":100, "entry_z":2.0,
+                    "exit_z":0.3, "sl_z":2.3, "volume_btc":0.192,
+                    "dynamic_hedge":False, "corr_min":0.7,
+                    "max_hold_bars":10, "adx_period":14, "adx_max":30,
+                    "atr_mult":0.0,
+                }
+
+                n = len(btc_main)
+                is_n = int(n * 0.65)
+                splits_data = {
+                    "IS":  (btc_main.iloc[:is_n],  eth_main.iloc[:is_n]),
+                    "OOS": (btc_main.iloc[is_n:],  eth_main.iloc[is_n:]),
+                }
+                if btc_fwd is not None and eth_fwd is not None:
+                    fwd_btc = btc_fwd.loc["2026-01-01":]
+                    fwd_eth = eth_fwd.loc["2026-01-01":]
+                    if len(fwd_btc) > 110 and len(fwd_eth) > 110:
+                        splits_data["FWD"] = (fwd_btc, fwd_eth)
+
+                all_results = {}
+                for label, (bdf, edf) in splits_data.items():
+                    strat = BTCETHSpreadStrategy(params=PARAMS)
+                    res   = run_backtest_pairs(bdf, edf, strat, cfg_broker, cfg_broker,
+                                              starting_equity=10_000, warmup_bars=100,
+                                              verbose=False)
+                    all_results[label] = res
+
+                st.session_state["pairs_results"] = all_results
+                st.session_state["pairs_splits"]  = splits_data
+
+            except Exception as e:
+                st.error(f"Pairs backtest error: {e}")
+                st.exception(e)
+                return
+
+    results = st.session_state.get("pairs_results", {})
+    if not results:
+        return
+
+    # ── Metrics table ────────────────────────────────────────────────────────
+    st.subheader("📊 IS / OOS / FWD Comparison")
+
+    rows = []
+    eq_curves = {}
+    for label, res in results.items():
+        ta = res.closed_trades_a
+        tb = res.closed_trades_b
+        n_tr = len(ta)
+        if n_tr == 0:
+            continue
+
+        pnl   = sum(t.pnl_net for t in ta) + sum(t.pnl_net for t in tb)
+        wins  = sum(1 for t in ta if t.pnl_net > 0)
+        w_pct = 100 * wins / n_tr
+        avg_t = pnl / n_tr
+
+        eq      = res.equity_curve
+        eq_vals = np.array([e[1] if isinstance(e,(tuple,list)) else e for e in eq], dtype=float)
+        dd      = eq_vals - np.maximum.accumulate(eq_vals)
+        max_dd  = dd.min()
+        max_dd_pct = 100 * max_dd / 10_000
+        total_ret  = 100 * (eq_vals[-1] - 10_000) / 10_000
+        rets   = np.diff(eq_vals) / np.where(eq_vals[:-1]!=0, eq_vals[:-1], 1)
+        sharpe = (rets.mean()/rets.std()*np.sqrt(252*96)) if rets.std()>0 else 0
+
+        eq_curves[label] = eq_vals
+        rows.append({
+            "Period": label,
+            "Trades": n_tr,
+            "Win %": f"{w_pct:.1f}%",
+            "Total PnL": f"${pnl:+,.2f}",
+            "Return": f"{total_ret:+.1f}%",
+            "Max DD": f"${max_dd:,.2f} ({max_dd_pct:.1f}%)",
+            "Sharpe": f"{sharpe:.3f}",
+            "Avg $/Trade": f"${avg_t:+.2f}",
+        })
+
+    if rows:
+        df_metrics = pd.DataFrame(rows).set_index("Period")
+        st.dataframe(df_metrics, use_container_width=True)
+
+    # ── Equity curves ────────────────────────────────────────────────────────
+    st.subheader("📈 Equity Curves")
+    split_colors = {"IS": "#4C9BE8", "OOS": "#F4A261", "FWD": "#2A9D8F"}
+
+    fig = go.Figure()
+    for label, eq_vals in eq_curves.items():
+        fig.add_trace(go.Scatter(
+            y=eq_vals,
+            name=label,
+            line=dict(color=split_colors.get(label, "#888"), width=2),
+            hovertemplate=f"{label}: $%{{y:,.2f}}<extra></extra>",
+        ))
+    fig.update_layout(
+        xaxis_title="Bar", yaxis_title="Equity ($)",
+        hovermode="x unified", height=420,
+        legend=dict(orientation="h", y=1.05),
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Drawdown chart ───────────────────────────────────────────────────────
+    st.subheader("📉 Drawdown")
+    fig_dd = go.Figure()
+    for label, eq_vals in eq_curves.items():
+        dd_vals = eq_vals - np.maximum.accumulate(eq_vals)
+        fig_dd.add_trace(go.Scatter(
+            y=dd_vals,
+            name=label,
+            fill="tozeroy",
+            line=dict(color=split_colors.get(label, "#888"), width=1.5),
+            hovertemplate=f"{label} DD: $%{{y:,.2f}}<extra></extra>",
+        ))
+    fig_dd.update_layout(
+        xaxis_title="Bar", yaxis_title="Drawdown ($)",
+        hovermode="x unified", height=300,
+        legend=dict(orientation="h", y=1.05),
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+    st.plotly_chart(fig_dd, use_container_width=True)
+
+    # ── Trade PnL distribution ───────────────────────────────────────────────
+    st.subheader("📋 Trade PnL Distribution (IS)")
+    if "IS" in results:
+        ta_is = results["IS"].closed_trades_a
+        tb_is = results["IS"].closed_trades_b
+        pnls_a = [t.pnl_net for t in ta_is]
+        pnls_b = [t.pnl_net for t in tb_is]
+        combined = [a + b for a, b in zip(pnls_a, pnls_b)]
+        if combined:
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Histogram(
+                x=combined, nbinsx=60,
+                marker_color=[COLORS["win"] if p > 0 else COLORS["loss"] for p in combined],
+                name="Trade PnL",
+            ))
+            fig_hist.add_vline(x=0, line_dash="dash", line_color="white", line_width=1)
+            fig_hist.update_layout(
+                xaxis_title="PnL per trade ($)", yaxis_title="Count",
+                height=300, margin=dict(l=10, r=10, t=30, b=10),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+    # ── Exit reasons ─────────────────────────────────────────────────────────
+    st.subheader("🚪 Exit Reasons by Period")
+    from collections import Counter
+    exit_rows = []
+    for label, res in results.items():
+        counts = Counter(t.exit_reason for t in res.closed_trades_a)
+        total  = sum(counts.values()) or 1
+        exit_rows.append({
+            "Period": label,
+            "zscore_exit": f"{counts.get('zscore_exit',0)} ({100*counts.get('zscore_exit',0)/total:.0f}%)",
+            "time_stop":   f"{counts.get('time_stop',0)} ({100*counts.get('time_stop',0)/total:.0f}%)",
+            "emergency_stop": f"{counts.get('emergency_stop',0)} ({100*counts.get('emergency_stop',0)/total:.0f}%)",
+        })
+    st.dataframe(pd.DataFrame(exit_rows).set_index("Period"), use_container_width=True)
+
+    st.caption(
+        "Strategy: BTC/ETH statistical spread mean reversion · "
+        "Filters: rolling correlation ≥ 0.7, spread ADX < 30, max hold 10 bars · "
+        "Fixed risk $50/trade (0.5% of $10k) · Commission 0.05% per leg · "
+        "All params optimised on IS only (2020–2024) · OOS and FWD are blind."
+    )
+
+
 def _show_quickstart():
     with st.expander("Quick Start", expanded=True):
         st.markdown("""
@@ -2173,36 +2439,52 @@ def main():
         "the engine's DataFeed blocks any access to future bars at runtime."
     )
 
-    # ── Load data ─────────────────────────────────────────────────────────────
+    # ── Tabs always rendered — Pairs Trading works without any data source ─────
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
+        "📊 Overview", "📉 Chart", "📈 Equity", "📋 Trades", "🔍 Breakdown",
+        "⚡ Compare", "🔄 Walk-Forward", "🎲 Monte Carlo", "💼 Portfolio",
+        "🏦 Funded", "🔗 Pairs Trading",
+    ])
+
+    with tab11:
+        tab_pairs()
+
+    # ── Load data (for tabs 1-10 only) ────────────────────────────────────────
     df, status = load_data(cfg)
 
     if status == "csv_no_path":
-        st.info("👈 Choose a data source in the sidebar to get started.")
-        _show_quickstart()
+        with tab1:
+            st.info("👈 Choose a data source in the sidebar to get started.")
+            _show_quickstart()
         return
     elif status.startswith("csv_not_found:"):
         path = status.split(":", 1)[1]
-        st.warning(f"Data file not found: `{path}`")
-        st.info("Check the CSV path in the sidebar.")
-        _show_quickstart()
+        with tab1:
+            st.warning(f"Data file not found: `{path}`")
+            st.info("Check the CSV path in the sidebar.")
+            _show_quickstart()
         return
     elif status == "csv_no_upload":
-        st.info("👈 Upload a CSV file in the sidebar.")
-        _show_quickstart()
+        with tab1:
+            st.info("👈 Upload a CSV file in the sidebar.")
+            _show_quickstart()
         return
     elif status == "fetch_first":
-        st.info("👈 Click **📥 Fetch** in the sidebar to load data from MT5, cTrader, or Yahoo Finance.")
-        _show_quickstart()
+        with tab1:
+            st.info("👈 Click **📥 Fetch** in the sidebar to load data from MT5, cTrader, or Yahoo Finance.")
+            _show_quickstart()
         return
     elif status == "source_unavailable":
-        st.warning(
-            "The selected data source is not available on this platform. "
-            "Switch to **CSV** or **Yahoo Finance** in the sidebar."
-        )
-        _show_quickstart()
+        with tab1:
+            st.warning(
+                "The selected data source is not available on this platform. "
+                "Switch to **CSV** or **Yahoo Finance** in the sidebar."
+            )
+            _show_quickstart()
         return
     elif status.startswith("error:"):
-        st.error(f"Failed to load data: {status[6:]}")
+        with tab1:
+            st.error(f"Failed to load data: {status[6:]}")
         return
 
     # Show data summary banner
@@ -2239,37 +2521,30 @@ def main():
     df_s    = st.session_state.get("df", df)
 
     if not results:
-        st.info("👈 Configure your strategy in the sidebar and click **▶ Run Backtest**.")
-        _show_quickstart()
-        return
-
-    # Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
-        "📊 Overview", "📉 Chart", "📈 Equity", "📋 Trades", "🔍 Breakdown",
-        "⚡ Compare", "🔄 Walk-Forward", "🎲 Monte Carlo", "💼 Portfolio",
-        "🏦 Funded",
-    ])
-
-    with tab1:
-        tab_overview(results)
-    with tab2:
-        tab_chart(results, df_s)
-    with tab3:
-        tab_equity(results)
-    with tab4:
-        tab_trades(results)
-    with tab5:
-        tab_breakdown(results)
-    with tab6:
-        tab_compare(cfg_s, df_s)
-    with tab7:
-        tab_walkforward(cfg_s, df_s)
-    with tab8:
-        tab_montecarlo(results, cfg_s)
-    with tab9:
-        tab_portfolio(cfg_s)
-    with tab10:
-        tab_funded(results, cfg_s)
+        with tab1:
+            st.info("👈 Configure your strategy in the sidebar and click **▶ Run Backtest**.")
+            _show_quickstart()
+    else:
+        with tab1:
+            tab_overview(results)
+        with tab2:
+            tab_chart(results, df_s)
+        with tab3:
+            tab_equity(results)
+        with tab4:
+            tab_trades(results)
+        with tab5:
+            tab_breakdown(results)
+        with tab6:
+            tab_compare(cfg_s, df_s)
+        with tab7:
+            tab_walkforward(cfg_s, df_s)
+        with tab8:
+            tab_montecarlo(results, cfg_s)
+        with tab9:
+            tab_portfolio(cfg_s)
+        with tab10:
+            tab_funded(results, cfg_s)
 
 
 if __name__ == "__main__":
