@@ -69,7 +69,7 @@ zengine-ui = "engine._cli:launch_ui"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["engine*", "strategies*"]
+include = ["engine*", "strategies*", "connectors*"]
 
 [tool.pytest.ini_options]
 testpaths    = ["tests"]
