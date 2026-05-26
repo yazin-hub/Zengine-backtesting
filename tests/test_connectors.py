@@ -313,6 +313,157 @@ class TestCTraderConnectorInit:
         assert "disconnected" in repr(conn)
         assert "CTraderConnector" in repr(conn)
 
+    def test_reconnect_delay_default(self):
+        conn = self._make()
+        assert conn._reconnect_delay == 2.0
+
+    def test_reconnect_delay_custom(self):
+        conn = self._make(reconnect_delay=5.0)
+        assert conn._reconnect_delay == 5.0
+
+    def test_reconnect_delay_zero_allowed(self):
+        """reconnect_delay=0 is valid (no sleep before re-auth)."""
+        conn = self._make(reconnect_delay=0.0)
+        assert conn._reconnect_delay == 0.0
+
+    def test_reconnect_delay_negative_raises(self):
+        with pytest.raises(ValueError, match="reconnect_delay"):
+            self._make(reconnect_delay=-1.0)
+
+    def test_on_reconnect_callback_stored(self):
+        cb   = MagicMock()
+        conn = self._make(on_reconnect=cb)
+        assert conn._on_reconnect is cb
+
+    def test_on_reconnect_default_none(self):
+        conn = self._make()
+        assert conn._on_reconnect is None
+
+    def test_is_reconnection_false_before_connect(self):
+        """_is_reconnection starts False — first _on_connected is not a reconnect."""
+        conn = self._make()
+        assert conn._is_reconnection is False
+
+
+# ── CTraderConnector — reconnect behaviour ────────────────────────────────────
+
+class TestCTraderConnectorReconnect:
+    """Tests for auto-reconnect and re-authentication logic."""
+
+    def _make(self, **kwargs):
+        from connectors.ctrader import CTraderConnector
+        defaults = dict(
+            client_id="x", client_secret="x",
+            account_id=1, access_token="x",
+            env="demo", reconnect_delay=0.0,
+        )
+        defaults.update(kwargs)
+        return CTraderConnector(**defaults)
+
+    def test_on_connected_first_call_sets_flag(self):
+        """First _on_connected sets _is_reconnection=True, does NOT spawn reauth."""
+        conn = self._make()
+        assert conn._is_reconnection is False
+
+        conn._on_connected(None)
+
+        assert conn._is_reconnection is True
+        assert conn._connected_evt.is_set()
+
+    def test_on_connected_reconnect_spawns_reauth(self):
+        """Second _on_connected (reconnect) spawns _reauthenticate in a thread."""
+        conn = self._make()
+        conn._is_reconnection = True  # simulate already connected once
+
+        with patch.object(conn, "_reauthenticate"):
+            with patch("connectors.ctrader.threading.Thread") as mock_thread:
+                mock_t = MagicMock()
+                mock_thread.return_value = mock_t
+                conn._on_connected(None)
+
+        mock_thread.assert_called_once()
+        mock_t.start.assert_called_once()
+
+    def test_on_disconnected_clears_auth(self):
+        """_on_disconnected clears auth state."""
+        conn = self._make()
+        conn._authenticated = True
+        conn._connected_evt.set()
+
+        conn._on_disconnected(None, "connection lost")
+
+        assert conn._authenticated is False
+        assert not conn._connected_evt.is_set()
+
+    def test_reauthenticate_success_calls_callback(self):
+        """_reauthenticate calls on_reconnect callback on success."""
+        cb   = MagicMock()
+        conn = self._make(on_reconnect=cb)
+
+        with patch.object(conn, "_authenticate"):
+            conn._reauthenticate()
+
+        cb.assert_called_once()
+
+    def test_reauthenticate_success_sets_authenticated(self):
+        """_reauthenticate sets _authenticated=True via _authenticate()."""
+        conn = self._make()
+
+        def _mock_auth():
+            conn._authenticated = True
+
+        with patch.object(conn, "_authenticate", side_effect=_mock_auth):
+            conn._reauthenticate()
+
+        assert conn._authenticated is True
+
+    def test_reauthenticate_failure_clears_authenticated(self):
+        """_reauthenticate sets _authenticated=False if _authenticate() raises."""
+        conn = self._make()
+        conn._authenticated = True  # pretend was authed before
+
+        with patch.object(conn, "_authenticate", side_effect=RuntimeError("auth fail")):
+            conn._reauthenticate()
+
+        assert conn._authenticated is False
+
+    def test_reauthenticate_callback_exception_does_not_propagate(self):
+        """on_reconnect callback raising should not crash _reauthenticate."""
+        cb   = MagicMock(side_effect=RuntimeError("telegram down"))
+        conn = self._make(on_reconnect=cb)
+
+        with patch.object(conn, "_authenticate"):
+            conn._reauthenticate()  # must not raise
+
+        cb.assert_called_once()
+
+    def test_reauthenticate_no_callback_is_safe(self):
+        """_reauthenticate with on_reconnect=None must not raise."""
+        conn = self._make(on_reconnect=None)
+
+        with patch.object(conn, "_authenticate"):
+            conn._reauthenticate()  # must not raise
+
+    def test_reauthenticate_skips_sleep_when_delay_zero(self):
+        """reconnect_delay=0 means no time.sleep call."""
+        conn = self._make(reconnect_delay=0.0)
+
+        with patch.object(conn, "_authenticate"), \
+             patch("connectors.ctrader.time") as mock_time:
+            conn._reauthenticate()
+
+        mock_time.sleep.assert_not_called()
+
+    def test_reauthenticate_sleeps_when_delay_nonzero(self):
+        """reconnect_delay>0 causes a time.sleep call before re-auth."""
+        conn = self._make(reconnect_delay=3.0)
+
+        with patch.object(conn, "_authenticate"), \
+             patch("connectors.ctrader.time") as mock_time:
+            conn._reauthenticate()
+
+        mock_time.sleep.assert_called_once_with(3.0)
+
 
 # ── CTraderConnector — behaviour when not connected ──────────────────────────
 

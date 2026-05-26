@@ -57,6 +57,7 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -103,12 +104,18 @@ class CTraderConnector(BaseConnector):
     market order placement with SL/TP post-fill amendment.
 
     Args:
-        client_id       : OAuth2 client ID from Spotware Connect.
-        client_secret   : OAuth2 client secret.
-        account_id      : Numeric cTrader account ID.
-        access_token    : Bearer token from OAuth2 flow.
-        env             : "demo" or "live".
-        connect_timeout : Seconds to wait for initial TCP connection (default 15).
+        client_id         : OAuth2 client ID from Spotware Connect.
+        client_secret     : OAuth2 client secret.
+        account_id        : Numeric cTrader account ID.
+        access_token      : Bearer token from OAuth2 flow.
+        env               : "demo" or "live".
+        connect_timeout   : Seconds to wait for initial TCP connection (default 15).
+        reconnect_delay   : Seconds to wait before re-authenticating after a TCP
+                            reconnect. A small pause lets the TCP layer stabilise
+                            before sending protobuf messages (default 2.0).
+        on_reconnect      : Optional callback called after every successful
+                            re-authentication. Signature: () -> None.
+                            Use this to send a Telegram alert, reset state, etc.
     """
 
     def __init__(
@@ -117,13 +124,17 @@ class CTraderConnector(BaseConnector):
         client_secret   : str,
         account_id      : int,
         access_token    : str,
-        env             : str   = "demo",
-        connect_timeout : float = 15.0,
+        env             : str                    = "demo",
+        connect_timeout : float                  = 15.0,
+        reconnect_delay : float                  = 2.0,
+        on_reconnect    : Callable[[], None] | None = None,
     ) -> None:
         if env not in ("demo", "live"):
             raise ValueError(f"env must be 'demo' or 'live', got {env!r}")
         if connect_timeout <= 0:
             raise ValueError(f"connect_timeout must be positive, got {connect_timeout}")
+        if reconnect_delay < 0:
+            raise ValueError(f"reconnect_delay must be >= 0, got {reconnect_delay}")
 
         self._client_id       = str(client_id)
         self._client_secret   = str(client_secret)
@@ -131,14 +142,17 @@ class CTraderConnector(BaseConnector):
         self._access_token    = str(access_token)
         self._env             = env
         self._connect_timeout = connect_timeout
+        self._reconnect_delay = reconnect_delay
+        self._on_reconnect    = on_reconnect
 
         # Set at connect() time
-        self._client         : Any               = None
-        self._reactor_thread : threading.Thread | None = None
-        self._connected_evt  = threading.Event()
-        self._authenticated  = False
-        self._symbol_map     : dict[str, dict]   = {}  # norm → {id, digits, name}
-        self._id_to_norm     : dict[int, str]    = {}  # symbolId → norm
+        self._client          : Any                    = None
+        self._reactor_thread  : threading.Thread | None = None
+        self._connected_evt   = threading.Event()
+        self._authenticated   = False
+        self._is_reconnection : bool                   = False   # True after first connect
+        self._symbol_map      : dict[str, dict]        = {}      # norm → {id, digits, name}
+        self._id_to_norm      : dict[int, str]         = {}      # symbolId → norm
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -147,8 +161,9 @@ class CTraderConnector(BaseConnector):
         Connect to cTrader API and authenticate.
 
         Blocks until connected and authenticated, or raises on failure.
-        Safe to call on a fresh instance — does NOT support reconnect
-        (create a new instance to reconnect).
+        After the initial connection, TCP reconnection is handled automatically
+        by Twisted's ReconnectingClientFactory. Re-authentication runs in a
+        background thread each time the connection is re-established.
 
         Raises:
             ImportError     : ctrader-open-api or twisted not installed.
@@ -224,19 +239,67 @@ class CTraderConnector(BaseConnector):
         reactor.run(installSignalHandlers=False)
 
     def _on_connected(self, client: Any) -> None:
+        """
+        Called by Twisted on every successful TCP connection — initial and reconnects.
+
+        On the first call: just set the event so connect() can proceed.
+        On subsequent calls (reconnects): spawn _reauthenticate() in a daemon
+        thread so the reactor thread is never blocked.
+        """
         self._connected_evt.set()
-        _log.info("TCP connection established to cTrader %s.", self._env)
+        if self._is_reconnection:
+            _log.info("TCP reconnected to cTrader %s — re-authenticating...", self._env)
+            t = threading.Thread(target=self._reauthenticate, daemon=True,
+                                 name="ctrader-reauth")
+            t.start()
+        else:
+            _log.info("TCP connection established to cTrader %s.", self._env)
+        # Mark True so every call after the first is treated as a reconnect
+        self._is_reconnection = True
 
     def _on_disconnected(self, client: Any, reason: Any) -> None:
+        """
+        Called by Twisted on TCP disconnect.
+        Twisted's ReconnectingClientFactory will automatically attempt to
+        restore the TCP connection — we just clear auth state here.
+        """
         self._connected_evt.clear()
         self._authenticated = False
-        _log.warning("Disconnected from cTrader: %s", reason)
+        _log.warning(
+            "Disconnected from cTrader %s: %s  (Twisted will reconnect automatically)",
+            self._env, reason,
+        )
 
     def _on_message(self, client: Any, message: Any) -> None:
         # Push events (SL/TP fills, etc.) — request-response pairs are
         # resolved by _send_sync() via Deferred callbacks, so nothing to
         # dispatch here for a polling-based live runner.
         pass
+
+    def _reauthenticate(self) -> None:
+        """
+        Re-run the full authentication sequence after a TCP reconnect.
+
+        Waits reconnect_delay seconds to let the TCP layer stabilise, then
+        calls _authenticate() which re-runs app auth, account auth, and reloads
+        the symbol cache. Calls the on_reconnect callback on success.
+
+        Mirrors the _reauthenticate() pattern from the reference CTraderAdapter.
+        """
+        try:
+            if self._reconnect_delay > 0:
+                time.sleep(self._reconnect_delay)
+            _log.info("Re-authenticating account %d...", self._account_id)
+            self._authenticate()
+            _log.info("Re-authentication successful — connector is live again.")
+            if self._on_reconnect is not None:
+                try:
+                    self._on_reconnect()
+                except Exception as exc:
+                    _log.warning("on_reconnect callback raised: %s", exc)
+        except Exception as exc:
+            self._authenticated = False
+            _log.error("Re-authentication failed: %s", exc, exc_info=True)
 
     def _send_sync(self, request: Any, timeout: float = 30.0) -> Any:
         """
