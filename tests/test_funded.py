@@ -333,20 +333,34 @@ class TestDailyLossLimit:
         assert fr.passed is False
         assert "Daily loss" in fr.failure_reason
 
-    def test_daily_limit_is_percentage_of_starting_not_current(self):
-        # Account grows to 10.5k day 1. Then loses $500 on day 2.
-        # Daily loss = $500 / $10,000 = 5% — exactly at limit.
-        # Depending on edge: should NOT fail (strictly <).
+    def test_daily_limit_uses_day_start_equity_not_initial_equity(self):
+        # Account grows to $10,500 on day 1. Day 2 starts at $10,500.
+        # Day 2 drops $500 → loss = $500 / $10,500 = 4.76% < 5% limit → PASS.
+        #
+        # Old (incorrect) behaviour would compute $500 / $10,000 = 5% and FAIL.
+        # New (correct) behaviour uses day_start_equity ($10,500) as denominator —
+        # matching how FTMO/Topstep actually calculate it: limit is X% of the
+        # account balance at the START OF THAT SPECIFIC DAY, not initial equity.
         eq = [
             10_000.0,   # day 1 start
-            10_500.0,   # day 1 end (profit)
-            10_000.0,   # day 2 — $500 loss = exactly 5% of 10k — boundary (should pass)
+            10_500.0,   # day 1 end — profit on day 1
+            10_000.0,   # day 2 — $500 loss = 4.76% of day-start $10,500 → within limit
         ]
         res = _make_result(eq, n_trading_days=2)
         fr  = run_funded_backtest(res, self._cfg())
-        # 5% == limit — >= check fires → fails at boundary
-        # (Match FTMO behaviour: strictly violating the rule)
-        assert fr.passed is False  # >= triggers at exactly 5%
+        assert fr.passed is True   # 4.76% < 5% daily limit
+
+    def test_daily_limit_triggers_at_percentage_of_day_start(self):
+        # Day starts at $10,500. Drop of $530 = 5.05% of $10,500 → exceeds 5% limit.
+        eq = [
+            10_000.0,   # day 1 start
+            10_500.0,   # day 1 end
+            9_970.0,    # day 2 — $530 loss = 5.05% of $10,500 → triggers
+        ]
+        res = _make_result(eq, n_trading_days=2)
+        fr  = run_funded_backtest(res, self._cfg())
+        assert fr.passed is False
+        assert "Daily loss" in fr.failure_reason
 
     def test_daily_limit_disabled_when_zero(self):
         # Huge daily loss — but daily limit is 0 (disabled)

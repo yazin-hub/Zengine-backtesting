@@ -407,15 +407,20 @@ def run_funded_backtest(
             break
 
         # ── Rule 2 — Daily loss limit ──────────────────────────────────────────
-        if cfg.daily_loss_limit_pct > 0.0:
-            daily_loss_pct = (day_start_equity - eq) / cfg.starting_equity
+        # Use day_start_equity as the denominator, not cfg.starting_equity.
+        # FTMO / Topstep calculate the daily limit against the account balance
+        # at the start of each trading day — so a profitable account has a
+        # proportionally higher absolute limit, matching how firms actually apply it.
+        # Guard against day_start_equity ≤ 0 (degenerate edge case only).
+        if cfg.daily_loss_limit_pct > 0.0 and day_start_equity > 0.0:
+            daily_loss_pct = (day_start_equity - eq) / day_start_equity
             if daily_loss_pct >= cfg.daily_loss_limit_pct:
                 failed         = True
                 failure_bar    = i
                 failure_reason = (
                     f"Daily loss limit breached — "
                     f"lost ${day_start_equity - eq:,.2f} today "
-                    f"({daily_loss_pct*100:.2f}% of ${cfg.starting_equity:,.0f}; "
+                    f"({daily_loss_pct*100:.2f}% of day-start ${day_start_equity:,.2f}; "
                     f"limit: {cfg.daily_loss_limit_pct*100:.1f}%) "
                     f"[date: {day}]"
                 )

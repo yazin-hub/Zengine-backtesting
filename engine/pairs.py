@@ -45,8 +45,9 @@ import numpy as np
 import pandas as pd
 
 from .backtest import _validate_df
-from .broker import Broker, BrokerConfig, OrderStatus
+from .broker import Broker, BrokerConfig, OrderSide, OrderStatus
 from .data import DataFeed
+from .risk import DailyCircuitBreaker
 
 _log = logging.getLogger(__name__)
 
@@ -221,12 +222,13 @@ def run_backtest_pairs(
     strategy:        PairsStrategy,
     broker_config_a: BrokerConfig,
     broker_config_b: BrokerConfig,
-    starting_equity: float = 10_000.0,
-    warmup_bars:     int   = 100,
-    label:           str   = "pairs",
-    symbol_a:        str   = "BTCUSD",
-    symbol_b:        str   = "ETHUSD",
-    verbose:         bool  = True,
+    starting_equity: float                        = 10_000.0,
+    warmup_bars:     int                          = 100,
+    label:           str                          = "pairs",
+    symbol_a:        str                          = "BTCUSD",
+    symbol_b:        str                          = "ETHUSD",
+    verbose:         bool                         = True,
+    circuit_breaker: DailyCircuitBreaker | None   = None,
 ) -> PairsResult:
     """
     Run a pairs trading backtest on two correlated assets.
@@ -249,6 +251,10 @@ def run_backtest_pairs(
         label            : Display label
         symbol_a/b       : Symbol names (metadata only — not used for data fetching)
         verbose          : Emit INFO-level log messages
+        circuit_breaker  : Optional DailyCircuitBreaker — evaluated before
+                           strategy.on_bar() each bar. Trips when realized +
+                           floating daily loss hits the configured limit.
+                           None (default) = no daily loss circuit breaker.
 
     Returns:
         PairsResult — use .summary(), .equity_curve, .spread_history, .zscore_history
@@ -321,13 +327,58 @@ def run_backtest_pairs(
         if "zscore" in feed_a._custom:
             zscore_history[i] = float(feed_a._custom["zscore"]._data[i])
 
-        # Step 3: strategy on_bar (after warmup)
+        # Step 3: circuit breaker + strategy on_bar (after warmup)
         if i >= warmup_bars:
             strategy._exit_requested = False
-            try:
-                strategy.on_bar(feed_a, broker_a, feed_b, broker_b)
-            except Exception as e:
-                _log.warning("  strategy.on_bar error at bar %d: %s", i, e)
+
+            # ── Engine-level daily loss circuit breaker ───────────────────────
+            # Checked BEFORE strategy.on_bar() so any strategy benefits.
+            # Computes realized (broker equity) + floating (open positions) loss
+            # since the start of the current UTC calendar day.
+            cb_block_entry = False
+            if circuit_breaker is not None and circuit_breaker.enabled:
+                today_str       = str(times[i].date())
+                combined_equity = broker_a.equity + broker_b.equity
+
+                # Day transition — reset baseline equity
+                if today_str != circuit_breaker._current_day:
+                    circuit_breaker.reset_day(today_str, combined_equity)
+
+                # Floating P&L from any open positions on both legs.
+                # broker.equity tracks only CLOSED trade P&L; open positions
+                # need manual calculation against current bar close price.
+                floating = 0.0
+                for pos in broker_a.open_positions:
+                    if pos.side == OrderSide.LONG:
+                        floating += (close_a[i] - pos.fill_price) * pos.size
+                    else:
+                        floating += (pos.fill_price - close_a[i]) * pos.size
+                for pos in broker_b.open_positions:
+                    if pos.side == OrderSide.LONG:
+                        floating += (close_b[i] - pos.fill_price) * pos.size
+                    else:
+                        floating += (pos.fill_price - close_b[i]) * pos.size
+
+                tripped = circuit_breaker.check(i, today_str, combined_equity, floating)
+                if tripped:
+                    # Force-close any open position via the standard exit path
+                    strategy._exit_reason    = "daily_circuit_breaker"
+                    strategy._exit_requested = True
+                    # Reset position state so strategy doesn't try to exit again
+                    if hasattr(strategy, "_position"):
+                        strategy._position  = 0
+                    if hasattr(strategy, "_entry_bar"):
+                        strategy._entry_bar = -1
+
+                cb_block_entry = circuit_breaker.is_blocked()
+
+            # Skip strategy.on_bar() entirely if circuit is tripped today.
+            # Exits already handled above; entries must not be placed.
+            if not cb_block_entry:
+                try:
+                    strategy.on_bar(feed_a, broker_a, feed_b, broker_b)
+                except Exception as e:
+                    _log.warning("  strategy.on_bar error at bar %d: %s", i, e)
 
             # Step 4: honour exit request — close both legs at this bar's price
             # Done BEFORE broker.on_bar() so fills are clean and immediate.
