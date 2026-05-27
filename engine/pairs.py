@@ -88,6 +88,9 @@ class PairsStrategy(ABC):
         # Set by strategy in on_bar() when it wants both legs closed this bar.
         # The runner checks this flag after on_bar() and calls close_all_at().
         self._exit_requested: bool = False
+        # Exit reason label passed to close_all_at(exit_reason=...).
+        # Subclasses set this before setting _exit_requested = True.
+        self._exit_reason: str = "zscore_exit"
 
     @abstractmethod
     def prepare(self, feed_a: DataFeed, feed_b: DataFeed) -> None:
