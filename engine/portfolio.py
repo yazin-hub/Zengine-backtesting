@@ -203,7 +203,7 @@ class PortfolioBroker(Broker):
             if sl_hit or tp_hit:
                 exit_px, reason = (t.sl, "sl") if sl_hit else (t.tp, "tp")
                 gross = ((exit_px - t.fill_price) if t.side.value == "long"
-                         else (t.fill_price - exit_px)) * t.size
+                         else (t.fill_price - exit_px)) * t.size * self._quote_to_usd(exit_px)
                 comm_exit    = self._calc_commission(t.size) * 0.5
                 t.commission += comm_exit
                 t.exit_bar    = bar_idx
@@ -224,7 +224,7 @@ class PortfolioBroker(Broker):
                      exit_reason: str = "end_of_data") -> None:
         for t in self._open:
             gross = ((price - t.fill_price) if t.side.value == "long"
-                     else (t.fill_price - price)) * t.size
+                     else (t.fill_price - price)) * t.size * self._quote_to_usd(price)
             comm          = self._calc_commission(t.size) * 0.5
             t.commission += comm
             t.exit_bar    = bar_idx
