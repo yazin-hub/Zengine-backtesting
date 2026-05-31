@@ -140,6 +140,11 @@ class BrokerConfig:
                                             # P&L is in XXX → divide by price to get USD)
     max_leverage: Optional[float] = None    # cap notional (USD) to max_leverage * equity.
                                             # None = no cap.
+    size_step:             float = 0.0      # tradeable lot step for risk sizing.
+                                            # 0 = legacy (round to whole units — correct
+                                            # for oz/contract assets, gold/FX). Set a
+                                            # fine step (e.g. 0.001) for fractional-priced
+                                            # assets (crypto) so risk size isn't floored.
     slippage_pct:          float = 0.0
     slippage_fixed:        float = 0.0      # price units, additive with slippage_pct
     spread:                float = 0.0      # bid/ask spread in price units
@@ -583,14 +588,21 @@ class Broker:
             usd_risk = cfg.risk_usd
 
         q2u  = self._quote_to_usd(limit)
-        size = max(cfg.min_size, round(usd_risk / (sl_dist * q2u)))
+        raw  = usd_risk / (sl_dist * q2u)
+        # Round to the instrument's tradeable lot step. step=1.0 (legacy default
+        # when size_step<=0) rounds to whole units — correct for oz/contract
+        # assets (gold/FX) and IDENTICAL to the prior behaviour. Fractional-priced
+        # assets (crypto) set size_step (e.g. 0.001) so the risk-based size isn't
+        # floored to min_size by integer rounding.
+        step = cfg.size_step if cfg.size_step and cfg.size_step > 0 else 1.0
+        size = max(cfg.min_size, round(raw / step) * step)
 
         # ── Optional max-leverage cap (notional expressed in USD) ─────────────
         if cfg.max_leverage and cfg.max_leverage > 0 and self.equity > 0:
             per_unit_usd = limit * q2u            # USD notional of one unit
             cap_usd      = cfg.max_leverage * self.equity
             if per_unit_usd > 0 and size * per_unit_usd > cap_usd:
-                size = max(cfg.min_size, math.floor(cap_usd / per_unit_usd))
+                size = max(cfg.min_size, math.floor((cap_usd / per_unit_usd) / step) * step)
 
         return size
 

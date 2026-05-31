@@ -1087,3 +1087,28 @@ class TestRiskSizingAndCurrency:
         broker = Broker(cfg, 10_000.0)
         size = broker._calc_size(2000.0, 1999.99)
         assert size > 150.0   # uncapped → far larger than the 30x cap above
+
+    def test_size_step_fractional_sizing(self):
+        """size_step lets fractional-priced assets (crypto) risk-scale instead of
+        being floored to min_size by whole-unit rounding."""
+        # BTC: risk $100, sl_dist 3750 → raw ≈ 0.0267
+        legacy = Broker(BrokerConfig(risk_usd=100.0, size_mode="fixed_risk",
+                        min_size=0.01, lot_size=1.0, size_step=0.0),
+                        10_000.0)._calc_size(90_000.0, 86_250.0)
+        stepped = Broker(BrokerConfig(risk_usd=100.0, size_mode="fixed_risk",
+                         min_size=0.01, lot_size=1.0, size_step=0.001),
+                         10_000.0)._calc_size(90_000.0, 86_250.0)
+        assert legacy == pytest.approx(0.01)              # floored: round(0.0267)=0 → min
+        assert stepped == pytest.approx(0.027, abs=1e-6)  # risk-scaled to the step
+        # scales with risk: half the risk → smaller size
+        half = Broker(BrokerConfig(risk_usd=50.0, size_mode="fixed_risk",
+                      min_size=0.01, lot_size=1.0, size_step=0.001),
+                      10_000.0)._calc_size(90_000.0, 86_250.0)
+        assert half < stepped
+
+    def test_size_step_default_unchanged_for_whole_unit(self):
+        """Default size_step=0 → whole-unit rounding (gold/FX behaviour unchanged)."""
+        g = Broker(BrokerConfig(risk_usd=100.0, size_mode="fixed_risk",
+                   min_size=1.0, lot_size=100.0),
+                   10_000.0)._calc_size(3000.0, 2925.0)
+        assert g == pytest.approx(1.0)   # round(100/75 = 1.33) = 1, as before
