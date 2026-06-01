@@ -1010,3 +1010,105 @@ class TestTrailingStops:
         assert len(broker.open_positions) == 0, "Trade should have closed on trailed SL"
         assert len(broker.closed_trades) == 1
         assert broker.closed_trades[0].exit_reason == "sl"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Risk-based sizing, quote-currency conversion, and leverage cap
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestRiskSizingAndCurrency:
+    """fixed_risk sizing must risk the configured USD amount (no lot_size factor),
+    JPY-quoted P&L must convert to USD, and max_leverage must cap notional."""
+
+    def test_fixed_risk_sizes_to_usd_risk_usd_quoted(self):
+        """USD-quoted: size = risk_usd / sl_dist (lot_size must NOT shrink size)."""
+        cfg = BrokerConfig(risk_usd=35.0, size_mode="fixed_risk",
+                           lot_size=100.0, min_size=1.0)
+        broker = Broker(cfg, 10_000.0)
+        # limit 2000, sl 1999.5 → sl_dist 0.5 → size = 35 / 0.5 = 70
+        assert broker._calc_size(2000.0, 1999.5) == pytest.approx(70.0)
+
+    def test_fixed_risk_loss_equals_risk_usd(self):
+        """A stop-out must lose ≈ risk_usd (proof the size is risk-correct)."""
+        cfg = BrokerConfig(commission_flat=0.0, risk_usd=35.0,
+                           size_mode="fixed_risk", lot_size=100.0, min_size=1.0)
+        broker = Broker(cfg, 10_000.0)
+        broker.place_order(side=OrderSide.LONG, order_type=OrderType.MARKET,
+                           limit_price=2000.0, sl=1999.5, tp=2010.0, placed_bar=0)
+        broker.on_bar(0, 2000.0, 2001.0, 1999.8, 2000.5)   # place
+        broker.on_bar(1, 2000.0, 2001.0, 1999.8, 2000.5)   # fill at open=2000
+        broker.on_bar(2, 2000.0, 2000.2, 1999.0, 1999.4)   # low < sl → stop
+        t = broker.closed_trades[0]
+        assert t.exit_reason == "sl"
+        assert t.pnl_gross == pytest.approx(-35.0, abs=0.5)
+
+    def test_quote_to_usd_factor(self):
+        cfg_usd = BrokerConfig(usd_conversion="none")
+        cfg_jpy = BrokerConfig(usd_conversion="inverse_price")
+        assert Broker(cfg_usd, 1.0)._quote_to_usd(150.0) == pytest.approx(1.0)
+        assert Broker(cfg_jpy, 1.0)._quote_to_usd(150.0) == pytest.approx(1.0 / 150.0)
+
+    def test_inverse_price_sizing_scales_with_price(self):
+        """USD/JPY: to risk $35 USD, quote-ccy risk = 35*price → size scales up."""
+        cfg = BrokerConfig(risk_usd=35.0, size_mode="fixed_risk",
+                           lot_size=100_000.0, min_size=1.0,
+                           usd_conversion="inverse_price")
+        broker = Broker(cfg, 10_000.0)
+        # price 150, sl_dist 0.5 → size = 35*150 / 0.5 = 10_500
+        assert broker._calc_size(150.0, 149.5) == pytest.approx(10_500.0)
+
+    def test_inverse_price_pnl_is_in_usd(self):
+        """USDJPY long: gross in JPY (price_diff*size) divided by price → USD."""
+        cfg = BrokerConfig(commission_flat=0.0, size_mode="fixed_size",
+                           fixed_size=10_000.0, usd_conversion="inverse_price")
+        broker = Broker(cfg, 10_000.0)
+        broker.place_order(side=OrderSide.LONG, order_type=OrderType.MARKET,
+                           limit_price=150.0, sl=149.0, tp=151.0, placed_bar=0)
+        broker.on_bar(0, 150.0, 150.2, 149.8, 150.0)
+        broker.on_bar(1, 150.0, 150.1, 149.9, 150.0)        # fill at 150
+        broker.on_bar(2, 150.0, 151.5, 149.9, 151.2)        # high>151 → TP at 151
+        t = broker.closed_trades[0]
+        # JPY gross = (151-150)*10_000 = 10_000 JPY → /151 ≈ $66.2 USD
+        assert t.pnl_gross == pytest.approx((151.0 - 150.0) * 10_000.0 / 151.0, rel=1e-3)
+
+    def test_max_leverage_caps_size(self):
+        """A tiny stop would size huge; max_leverage caps notional to L*equity."""
+        cfg = BrokerConfig(risk_usd=1_000.0, size_mode="fixed_risk",
+                           lot_size=100.0, min_size=1.0, max_leverage=30.0)
+        broker = Broker(cfg, 10_000.0)
+        # tiny sl_dist → raw size enormous; cap = 30*10_000 = 300_000 USD notional
+        # at price 2000 → max size = floor(300_000 / 2000) = 150
+        assert broker._calc_size(2000.0, 1999.99) == pytest.approx(150.0)
+
+    def test_no_cap_when_max_leverage_none(self):
+        """Default (max_leverage=None) imposes no cap."""
+        cfg = BrokerConfig(risk_usd=1_000.0, size_mode="fixed_risk",
+                           lot_size=100.0, min_size=1.0)
+        broker = Broker(cfg, 10_000.0)
+        size = broker._calc_size(2000.0, 1999.99)
+        assert size > 150.0   # uncapped → far larger than the 30x cap above
+
+    def test_size_step_fractional_sizing(self):
+        """size_step lets fractional-priced assets (crypto) risk-scale instead of
+        being floored to min_size by whole-unit rounding."""
+        # BTC: risk $100, sl_dist 3750 → raw ≈ 0.0267
+        legacy = Broker(BrokerConfig(risk_usd=100.0, size_mode="fixed_risk",
+                        min_size=0.01, lot_size=1.0, size_step=0.0),
+                        10_000.0)._calc_size(90_000.0, 86_250.0)
+        stepped = Broker(BrokerConfig(risk_usd=100.0, size_mode="fixed_risk",
+                         min_size=0.01, lot_size=1.0, size_step=0.001),
+                         10_000.0)._calc_size(90_000.0, 86_250.0)
+        assert legacy == pytest.approx(0.01)              # floored: round(0.0267)=0 → min
+        assert stepped == pytest.approx(0.027, abs=1e-6)  # risk-scaled to the step
+        # scales with risk: half the risk → smaller size
+        half = Broker(BrokerConfig(risk_usd=50.0, size_mode="fixed_risk",
+                      min_size=0.01, lot_size=1.0, size_step=0.001),
+                      10_000.0)._calc_size(90_000.0, 86_250.0)
+        assert half < stepped
+
+    def test_size_step_default_unchanged_for_whole_unit(self):
+        """Default size_step=0 → whole-unit rounding (gold/FX behaviour unchanged)."""
+        g = Broker(BrokerConfig(risk_usd=100.0, size_mode="fixed_risk",
+                   min_size=1.0, lot_size=100.0),
+                   10_000.0)._calc_size(3000.0, 2925.0)
+        assert g == pytest.approx(1.0)   # round(100/75 = 1.33) = 1, as before

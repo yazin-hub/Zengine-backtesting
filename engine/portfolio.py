@@ -39,7 +39,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -135,108 +134,22 @@ class PortfolioBroker(Broker):
 
     @equity.setter
     def equity(self, value: float) -> None:
-        # Called by parent __init__ — ignore, we use shared equity
-        pass
+        # The inherited Broker logic mutates equity via ``self.equity -= comm``
+        # and ``self.equity += pnl``. Translate those absolute-value writes into
+        # deltas applied to the shared pool so all per-symbol brokers stay in sync.
+        shared = getattr(self, "_shared", None)
+        if shared is None:
+            return  # during super().__init__, before _shared is wired up
+        delta = value - shared.value
+        if delta:
+            shared.adjust(delta)
 
-    def _apply_commission(self, amount: float) -> None:
-        self._shared.deduct_commission(amount)
-
-    def on_bar(self, bar_idx: int,
-               open_: float, high: float, low: float, close: float,
-               bar_time: "pd.Timestamp | None" = None,
-               atr: float | None = None) -> None:
-        """
-        Override on_bar to route P&L changes through SharedEquity.
-        We capture equity before/after and apply the delta to the shared pool.
-        """
-        # Snapshot open positions' commission deductions
-        cfg = self.config
-
-        # --- Try to fill pending order ---
-        just_filled: set[int] = set()
-        if self._pending is not None and self._pending.placed_bar < bar_idx:
-            t = self._pending
-            filled, fill_px = False, math.nan
-
-            if t.order_type.value == "market":
-                fill_px = open_ * (1 + cfg.slippage_pct * (1 if t.side.value == "long" else -1))
-                filled  = True
-            elif t.order_type.value == "limit":
-                if t.side.value == "long" and low <= t.limit_price:
-                    fill_px = open_ if open_ <= t.limit_price else t.limit_price
-                    fill_px *= (1 + cfg.slippage_pct)
-                    filled   = True
-                elif t.side.value == "short" and high >= t.limit_price:
-                    fill_px = open_ if open_ >= t.limit_price else t.limit_price
-                    fill_px *= (1 - cfg.slippage_pct)
-                    filled   = True
-                elif (bar_idx - t.placed_bar) >= t.expiry_bars:
-                    t.status = OrderStatus.EXPIRED
-                    self._history.append(t)
-                    self._pending = None
-
-            if filled:
-                t.fill_bar    = bar_idx
-                t.fill_price  = fill_px
-                t.status      = OrderStatus.OPEN
-                comm_entry    = self._calc_commission(t.size) * 0.5
-                t.commission += comm_entry
-                self._shared.deduct_commission(comm_entry)
-                just_filled.add(id(t))
-                self._open.append(t)
-                self._pending = None
-
-        # --- Manage open positions ---
-        still_open = []
-        for t in self._open:
-            if id(t) in just_filled:
-                still_open.append(t)
-                continue
-            sl_hit = tp_hit = False
-            if t.side.value == "long":
-                sl_hit = low  <= t.sl
-                tp_hit = high >= t.tp
-            else:
-                sl_hit = high >= t.sl
-                tp_hit = low  <= t.tp
-
-            if sl_hit or tp_hit:
-                exit_px, reason = (t.sl, "sl") if sl_hit else (t.tp, "tp")
-                gross = ((exit_px - t.fill_price) if t.side.value == "long"
-                         else (t.fill_price - exit_px)) * t.size
-                comm_exit    = self._calc_commission(t.size) * 0.5
-                t.commission += comm_exit
-                t.exit_bar    = bar_idx
-                t.exit_price  = exit_px
-                t.exit_reason = reason
-                t.pnl_gross   = gross
-                t.pnl_net     = gross - comm_exit
-                t.status      = OrderStatus.CLOSED
-                self._shared.adjust(t.pnl_net)
-                self._shared.deduct_commission(comm_exit)
-                self._history.append(t)
-            else:
-                still_open.append(t)
-        self._open = still_open
-
-    def close_all_at(self, bar_idx: int, price: float,
-                     bar_time: "pd.Timestamp | None" = None,
-                     exit_reason: str = "end_of_data") -> None:
-        for t in self._open:
-            gross = ((price - t.fill_price) if t.side.value == "long"
-                     else (t.fill_price - price)) * t.size
-            comm          = self._calc_commission(t.size) * 0.5
-            t.commission += comm
-            t.exit_bar    = bar_idx
-            t.exit_price  = price
-            t.exit_reason = exit_reason
-            t.pnl_gross   = gross
-            t.pnl_net     = gross - comm
-            t.status      = OrderStatus.CLOSED
-            self._shared.adjust(t.pnl_net)
-            self._shared.deduct_commission(comm)
-            self._history.append(t)
-        self._open = []
+    # on_bar() and close_all_at() are inherited UNCHANGED from the base Broker,
+    # so the portfolio path now uses the same cost-aware fill model as single-
+    # instrument backtests: spread, slippage, gap-fill, trailing stops, intrabar
+    # path model, and quote-currency conversion. The base writes P&L via
+    # ``self.equity +=/-=``, which the equity setter above redirects into the
+    # shared pool — keeping all per-symbol brokers in sync.
 
 
 # ── Portfolio container ────────────────────────────────────────────────────────

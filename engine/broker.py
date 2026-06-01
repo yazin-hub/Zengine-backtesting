@@ -135,6 +135,16 @@ class BrokerConfig:
     fixed_size:            float = 1.0
     pct_equity_risk:       float = 0.01
     min_size:              float = 1.0
+    usd_conversion:        str   = "none"   # 'none' (quote ccy already USD) |
+                                            # 'inverse_price' (USD/XXX pair, e.g. USDJPY:
+                                            # P&L is in XXX → divide by price to get USD)
+    max_leverage: Optional[float] = None    # cap notional (USD) to max_leverage * equity.
+                                            # None = no cap.
+    size_step:             float = 0.0      # tradeable lot step for risk sizing.
+                                            # 0 = legacy (round to whole units — correct
+                                            # for oz/contract assets, gold/FX). Set a
+                                            # fine step (e.g. 0.001) for fractional-priced
+                                            # assets (crypto) so risk size isn't floored.
     slippage_pct:          float = 0.0
     slippage_fixed:        float = 0.0      # price units, additive with slippage_pct
     spread:                float = 0.0      # bid/ask spread in price units
@@ -444,7 +454,7 @@ class Broker:
 
             if reason:
                 gross = ((exit_px - t.fill_price) if t.side == OrderSide.LONG
-                         else (t.fill_price - exit_px)) * t.size
+                         else (t.fill_price - exit_px)) * t.size * self._quote_to_usd(exit_px)
                 comm_exit    = self._calc_commission(t.size) * 0.5
                 t.commission += comm_exit
                 t.exit_bar    = bar_idx
@@ -473,7 +483,7 @@ class Broker:
         for t in self._open:
             exit_px = self._apply_spread_exit(price, t.side, eff_spread)
             gross   = ((exit_px - t.fill_price) if t.side == OrderSide.LONG
-                       else (t.fill_price - exit_px)) * t.size
+                       else (t.fill_price - exit_px)) * t.size * self._quote_to_usd(exit_px)
             comm          = self._calc_commission(t.size) * 0.5
             t.commission += comm
             t.exit_bar    = bar_idx
@@ -542,25 +552,59 @@ class Broker:
             return price
         return price + eff
 
+    def _quote_to_usd(self, price: float) -> float:
+        """Factor converting a P&L amount in the instrument's QUOTE currency to USD.
+
+        Profit is computed as ``price_diff * size``, which is denominated in the
+        quote currency.
+
+          - 'none'          : quote currency is already USD (XAUUSD, GBPUSD, …) → 1.0
+          - 'inverse_price' : instrument is USD/XXX (USD is the base, e.g. USDJPY),
+                              so P&L is in XXX. USD value = quote / (USD/XXX rate) →
+                              divide by the price.
+        """
+        if self.config.usd_conversion == "inverse_price":
+            return 1.0 / price if price > 0 else 1.0
+        return 1.0
+
     def _calc_size(self, limit: float, sl: float) -> float:
         cfg     = self.config
         sl_dist = abs(limit - sl)
         if sl_dist <= 0:
             return cfg.min_size
 
-        if cfg.size_mode == "fixed_risk":
-            raw = cfg.risk_usd / (sl_dist * cfg.lot_size)
-            return max(cfg.min_size, round(raw))
-
-        elif cfg.size_mode == "fixed_size":
+        if cfg.size_mode == "fixed_size":
             return cfg.fixed_size
 
-        elif cfg.size_mode == "pct_equity":
-            risk_amt = self.equity * cfg.pct_equity_risk
-            raw = risk_amt / (sl_dist * cfg.lot_size)
-            return max(cfg.min_size, round(raw))
+        # ── Risk-based sizing (fixed_risk | pct_equity) ───────────────────────
+        # P&L moves by  sl_dist * size  in the QUOTE currency. The configured
+        # risk is in USD (account currency), so translate it into quote-ccy
+        # terms before dividing by the stop distance:
+        #     usd_risk = sl_dist * size * quote_to_usd(price)
+        #  ⇒  size     = usd_risk / (sl_dist * quote_to_usd(price))
+        if cfg.size_mode == "pct_equity":
+            usd_risk = self.equity * cfg.pct_equity_risk
+        else:  # fixed_risk (default)
+            usd_risk = cfg.risk_usd
 
-        return cfg.min_size
+        q2u  = self._quote_to_usd(limit)
+        raw  = usd_risk / (sl_dist * q2u)
+        # Round to the instrument's tradeable lot step. step=1.0 (legacy default
+        # when size_step<=0) rounds to whole units — correct for oz/contract
+        # assets (gold/FX) and IDENTICAL to the prior behaviour. Fractional-priced
+        # assets (crypto) set size_step (e.g. 0.001) so the risk-based size isn't
+        # floored to min_size by integer rounding.
+        step = cfg.size_step if cfg.size_step and cfg.size_step > 0 else 1.0
+        size = max(cfg.min_size, round(raw / step) * step)
+
+        # ── Optional max-leverage cap (notional expressed in USD) ─────────────
+        if cfg.max_leverage and cfg.max_leverage > 0 and self.equity > 0:
+            per_unit_usd = limit * q2u            # USD notional of one unit
+            cap_usd      = cfg.max_leverage * self.equity
+            if per_unit_usd > 0 and size * per_unit_usd > cap_usd:
+                size = max(cfg.min_size, math.floor((cap_usd / per_unit_usd) / step) * step)
+
+        return size
 
     def _calc_commission(self, size: float) -> float:
         cfg = self.config

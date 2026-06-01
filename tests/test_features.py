@@ -639,3 +639,33 @@ class TestPortfolio:
                 strategies={"A": TrendFollowStrategy(), "MISSING": TrendFollowStrategy()},
                 portfolio_cfg=pcfg, verbose=False,
             )
+
+    def test_portfolio_applies_spread_cost(self):
+        """The portfolio path must charge spread (it previously ignored it).
+
+        Two identical runs differing only in `spread` must produce different
+        equity — proving PortfolioBroker now uses the cost-aware base fill model.
+        """
+        from engine.portfolio import run_backtest_portfolio, PortfolioConfig
+
+        def _run(spread: float) -> float:
+            df = _make_df(2000, seed=7, start="2024-01-01")
+            cfg = BrokerConfig(commission_flat=0.0, lot_size=100.0,
+                               risk_usd=10.0, size_mode="fixed_risk", spread=spread)
+            pcfg = PortfolioConfig(
+                symbols=["A"], broker_configs={"A": cfg},
+                starting_equity=10_000.0, warmup_bars=20,
+            )
+            res = run_backtest_portfolio(
+                dfs={"A": df}, strategies={"A": TrendFollowStrategy()},
+                portfolio_cfg=pcfg, verbose=False,
+            )
+            return res.final_equity
+
+        no_spread   = _run(0.0)
+        with_spread = _run(0.50)
+        # Spread is a round-trip cost → equity with spread must be strictly lower.
+        assert with_spread < no_spread, (
+            f"Spread not charged in portfolio path: "
+            f"no_spread={no_spread:.2f} with_spread={with_spread:.2f}"
+        )
